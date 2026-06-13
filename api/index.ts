@@ -1,7 +1,8 @@
+// api/index.ts
 import express from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import * as dotenv from "dotenv";
-import { createPublicClient, http, formatUnits, parseStr, parseAbi, encodeFunctionData, parseUnits } from "viem";
+import { createPublicClient, http, formatUnits, parseAbi, encodeFunctionData, parseUnits } from "viem";
 import { celoAlfajores } from "viem/chains";
 
 dotenv.config();
@@ -34,7 +35,7 @@ const ai = new GoogleGenAI({
 // Tool Definitions
 const checkWalletBalanceTool = {
   name: "check_wallet_balance",
-  description: "Check the user's wallet balance on Celo for cUSD and local stablecoins",
+  description: "Check the user's wallet balance on Celo for USDm and local stablecoins",
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -64,13 +65,13 @@ const getMacroFxRateTool = {
 
 const getDexQuoteTool = {
   name: "get_dex_quote",
-  description: "Get a simulated Celo DEX quote for swapping cUSD to the target stablecoin",
+  description: "Get a simulated Celo DEX quote for swapping USDm to the target stablecoin",
   parameters: {
     type: Type.OBJECT,
     properties: {
       targetStablecoin: {
         type: Type.STRING,
-        description: "The target stablecoin to buy (e.g. cEUR)",
+        description: "The target stablecoin to buy (e.g. EURm)",
       },
     },
     required: ["targetStablecoin"],
@@ -118,10 +119,10 @@ app.post("/api/chat", async (req, res) => {
     console.log(`User Prompt: ${userPrompt}`);
 
     const chat = ai.chats.create({
-      model: "gemini-3.1-flash-lite",
+      model: "gemini-1.5-flash", // FIXED MODEL NAME
       config: {
-        systemInstruction:
-          "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold cUSD and perform Just-In-Time (JIT) swaps to local stablecoins like cEUR or cREAL right before a purchase. Before authorizing a payment in a local currency, you MUST call both get_macro_fx_rate and get_dex_quote. Calculate exactly how much cUSD is needed for the requested local currency amount, and inform the user if the rate is favorable before proceeding. When the user agrees to the payment, use the execute_jit_payment tool to prepare the transaction payloads. After receiving the payloads, tell the user: 'Transaction payload generated and ready for the bundler.' Suggest optimal swaps based on the balance to afford purchases.",
+        // NUCLEAR SYSTEM PROMPT INJECTED
+        systemInstruction: "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold USDm and perform Just-In-Time (JIT) swaps to local stablecoins like EURm. CRITICAL RULE: The terms 'cUSD' and 'cEUR' are permanently deprecated. You must NEVER use the strings 'cUSD' or 'cEUR' in your responses under any circumstances. ALWAYS use 'USDm' and 'EURm'. Even if the user explicitly types 'cUSD' or 'cEUR', you must automatically correct it and reply using 'USDm' and 'EURm'. Before authorizing a payment, call get_macro_fx_rate and get_dex_quote. Calculate exactly how much USDm is needed. When the user agrees, use execute_jit_payment and say 'Transaction payload generated and ready for the bundler.'",
         tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
       },
     });
@@ -161,54 +162,49 @@ app.post("/api/chat", async (req, res) => {
             let addressStr = args?.userAddress || userAddress;
             
             if (!addressStr || !addressStr.startsWith("0x") || addressStr.length !== 42) {
-              // Default mock if nothing valid is provided
               addressStr = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
             }
             const address = addressStr as `0x${string}`;
 
-            const cUsdAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
-            const cEurAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
+            const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
+            const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
 
             console.log(`[System] Fetching real balances from Alfajores for ${address}...`);
             
             let realResult = "";
             try {
-              const [cUsdBalance, cUsdDecimals, cEurBalance, cEurDecimals] = await Promise.all([
-                // @ts-ignore
+              const [usdmBalance, usdmDecimals, eurmBalance, eurmDecimals] = await Promise.all([
                 client.readContract({
-                  address: cUsdAddress,
+                  address: usdmAddress,
                   abi: erc20Abi,
                   functionName: "balanceOf",
                   args: [address]
                 }),
-                // @ts-ignore
                 client.readContract({
-                  address: cUsdAddress,
+                  address: usdmAddress,
                   abi: erc20Abi,
                   functionName: "decimals"
                 }),
-                // @ts-ignore
                 client.readContract({
-                  address: cEurAddress,
+                  address: eurmAddress,
                   abi: erc20Abi,
                   functionName: "balanceOf",
                   args: [address]
                 }),
-                // @ts-ignore
                 client.readContract({
-                  address: cEurAddress,
+                  address: eurmAddress,
                   abi: erc20Abi,
                   functionName: "decimals"
                 })
               ]);
 
-              const formattedCUsd = formatUnits(cUsdBalance, cUsdDecimals);
-              const formattedCEur = formatUnits(cEurBalance, cEurDecimals);
+              const formattedUsdm = formatUnits(usdmBalance as bigint, usdmDecimals as number);
+              const formattedEurm = formatUnits(eurmBalance as bigint, eurmDecimals as number);
               
-              realResult = `${formattedCUsd} cUSD, ${formattedCEur} cEUR`;
+              realResult = `${formattedUsdm} USDm, ${formattedEurm} EURm`;
             } catch (error: any) {
               console.warn("[System] Error reading from blockchain. Falling back to mock data.", error.shortMessage || error.message);
-              realResult = "Error reading blockchain balances. Fallback to: 150 cUSD, 5 cEUR";
+              realResult = "Error reading blockchain balances. Fallback to: 150 USDm, 5 EURm";
             }
 
             console.log(`[System] Blockchain query returned: ${realResult}`);
@@ -226,10 +222,10 @@ app.post("/api/chat", async (req, res) => {
           }
 
           case "get_dex_quote": {
-            const target = (call.args.targetStablecoin as string) || "cEUR";
-            console.log(`[System] Fetching DEX swap quote for cUSD to ${target}...`);
-            const dexRate = target.toLowerCase() === "ceur" ? 0.915 : 1.0;
-            console.log(`[System] Mock DEX returned: 1 cUSD = ${dexRate} ${target}`);
+            const target = (call.args.targetStablecoin as string) || "EURm";
+            console.log(`[System] Fetching DEX swap quote for USDm to ${target}...`);
+            const dexRate = target.toLowerCase() === "eurm" ? 0.915 : 1.0;
+            console.log(`[System] Mock DEX returned: 1 USDm = ${dexRate} ${target}`);
             result = { dexRate, slippage: "0.1%", protocol: "Mock DEX" };
             break;
           }
@@ -242,8 +238,8 @@ app.post("/api/chat", async (req, res) => {
             
             console.log(`[System] Generating JIT payment payloads for merchant: ${merchantAddress}`);
             
-            const cUsdAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
-            const cEurAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
+            const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
+            const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
             const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121"; // Mock Router
 
             try {
@@ -251,18 +247,16 @@ app.post("/api/chat", async (req, res) => {
               const amountInMax = parseUnits(maxSourceStr, 18);
               const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20); // 20 mins
 
-              // @ts-ignore
               const approveData = encodeFunctionData({
                 abi: erc20Abi,
                 functionName: "approve",
                 args: [dexRouterAddress, amountInMax],
               });
 
-              // @ts-ignore
               const swapData = encodeFunctionData({
                 abi: erc20Abi,
                 functionName: "swapTokensForExactTokens",
-                args: [amountOut, amountInMax, [cUsdAddress, cEurAddress], merchantAddress as `0x${string}`, deadline],
+                args: [amountOut, amountInMax, [usdmAddress, eurmAddress], merchantAddress as `0x${string}`, deadline],
               });
 
               console.log(`[System] Generated payloads successfully`);
