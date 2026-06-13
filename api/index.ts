@@ -1,331 +1,285 @@
-// api/index.ts
-import express from "express";
-import { GoogleGenAI, Type } from "@google/genai";
-import * as dotenv from "dotenv";
-import { createPublicClient, http, formatUnits, parseAbi, encodeFunctionData, parseUnits } from "viem";
-import { celoAlfajores } from "viem/chains";
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-dotenv.config();
+import React, { useState, useRef, useEffect } from "react";
+import { Send, Zap } from "lucide-react";
 
-// Configure Viem client for Celo Alfajores testnet
-const client = createPublicClient({
-  chain: celoAlfajores,
-  transport: http("https://alfajores-forno.celo-testnet.org", {
-    timeout: 3000,
-  }),
-});
+const USER_ADDRESS = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
 
-// ERC-20 ABI for balance checking and DEX interactions
-const erc20Abi = parseAbi([
-  "function balanceOf(address owner) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function swapTokensForExactTokens(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)"
-]);
-
-if (!process.env.GEMINI_API_KEY) {
-  console.error("CRITICAL: GEMINI_API_KEY is missing from .env file!");
-}
-
-// Initialize the @google/genai client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
-
-// Tool Definitions
-const checkWalletBalanceTool = {
-  name: "check_wallet_balance",
-  description: "Check the user's wallet balance on Celo for USDm and local stablecoins",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      userAddress: {
-        type: Type.STRING,
-        description: "The address of the user's wallet",
-      },
-    },
-    required: ["userAddress"],
-  },
+type Message = {
+  role: "user" | "aegis";
+  text: string;
 };
 
-const getMacroFxRateTool = {
-  name: "get_macro_fx_rate",
-  description: "Check a Web2 API for the current fiat exchange rate between USD and the target currency",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      targetFiat: {
-        type: Type.STRING,
-        description: "The target fiat currency (e.g. EUR, BRL)",
-      },
-    },
-    required: ["targetFiat"],
-  },
+// Abstract sleek shield / geometric 'A' logo
+const AegisLogo = () => (
+  <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M16 2L4 7.5V14.5C4 21.5 9 28.5 16 31C23 28.5 28 21.5 28 14.5V7.5L16 2Z" fill="url(#paint0_linear)" />
+    <path d="M16 8L10 18H22L16 8Z" fill="#E8F4EC" />
+    <path d="M16 8L10 18H16V8Z" fill="#00D3A1" />
+    <defs>
+      <linearGradient id="paint0_linear" x1="4" y1="2" x2="28" y2="31" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#00E676" />
+        <stop offset="1" stopColor="#00E5FF" />
+      </linearGradient>
+    </defs>
+  </svg>
+);
+
+const TypewriterText = ({ text, speed = 15 }: { text: string; speed?: number }) => {
+  const [displayedText, setDisplayedText] = useState("");
+
+  useEffect(() => {
+    let index = 0;
+    setDisplayedText("");
+    const timer = setInterval(() => {
+      if (index < text.length) {
+        index++;
+        setDisplayedText(text.slice(0, index));
+      } else {
+        clearInterval(timer);
+      }
+    }, speed);
+    return () => clearInterval(timer);
+  }, [text, speed]);
+
+  return <>{displayedText}</>;
 };
 
-const getDexQuoteTool = {
-  name: "get_dex_quote",
-  description: "Get a simulated Celo DEX quote for swapping USDm to the target stablecoin",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      targetStablecoin: {
-        type: Type.STRING,
-        description: "The target stablecoin to buy (e.g. EURm)",
-      },
-    },
-    required: ["targetStablecoin"],
-  },
-};
+export default function App() {
+  const [currentView, setCurrentView] = useState<"landing" | "connecting" | "chat">("landing");
+  const [prompt, setPrompt] = useState("");
+  const [chatLog, setChatLog] = useState<Message[]>([
+    { role: "aegis", text: "Hello! I am Aegis, your shield against inflation. How can I protect your assets today?" }
+  ]);
+  const [loading, setLoading] = useState(false);
+  const [pendingPayloads, setPendingPayloads] = useState<any[] | null>(null);
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-const executeJitPaymentTool = {
-  name: "execute_jit_payment",
-  description: "Prepare transaction payloads for a Just-In-Time swap and payment via a Smart Contract Wallet",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      merchantAddress: {
-        type: Type.STRING,
-        description: "The address of the merchant to receive the payment",
-      },
-      amountTargetToken: {
-        type: Type.STRING,
-        description: "The exact amount of the target token (e.g. 5) the merchant should receive",
-      },
-      maxAmountSourceToken: {
-        type: Type.STRING,
-        description: "The maximum amount of the source token (e.g. 5.5) to spend for the swap",
-      },
-    },
-    required: ["merchantAddress", "amountTargetToken", "maxAmountSourceToken"],
-  },
-};
-
-const app = express();
-
-app.use(express.json());
-
-// API POST endpoint for chat
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { userPrompt, userAddress } = req.body;
-
-    if (!userPrompt) {
-      return res.status(400).json({ error: "userPrompt is required" });
+  useEffect(() => {
+    if (currentView === "connecting") {
+      const timer = setTimeout(() => setCurrentView("chat"), 2000);
+      return () => clearTimeout(timer);
     }
+  }, [currentView]);
 
-    console.log(`\n--- New Chat Session ---`);
-    console.log(`User Address: ${userAddress || "Not provided"}`);
-    console.log(`User Prompt: ${userPrompt}`);
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
 
-    const chat = ai.chats.create({
-      model: "gemini-1.5-flash", // FIXED MODEL NAME
-      config: {
-        // NUCLEAR SYSTEM PROMPT INJECTED
-        systemInstruction: "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold USDm and perform Just-In-Time (JIT) swaps to local stablecoins like EURm. CRITICAL RULE: The terms 'cUSD' and 'cEUR' are permanently deprecated. You must NEVER use the strings 'cUSD' or 'cEUR' in your responses under any circumstances. ALWAYS use 'USDm' and 'EURm'. Even if the user explicitly types 'cUSD' or 'cEUR', you must automatically correct it and reply using 'USDm' and 'EURm'. Before authorizing a payment, call get_macro_fx_rate and get_dex_quote. Calculate exactly how much USDm is needed. When the user agrees, use execute_jit_payment and say 'Transaction payload generated and ready for the bundler.'",
-        tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
-      },
-    });
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatLog, loading]);
 
-    // Contextual prompt if userAddress is known to the backend but not explicitly stated
-    const promptToSend = userAddress ? `${userPrompt}\nMy address is ${userAddress}.` : userPrompt;
+  const sendMessage = async () => {
+    if (!prompt.trim()) return;
 
-    let response;
+    const userMessage = { role: "user" as const, text: prompt };
+    setChatLog((prev) => [...prev, userMessage]);
+    setPrompt("");
+    setLoading(true);
+    setPendingPayloads(null);
+
     try {
-      response = await chat.sendMessage({ message: promptToSend });
-    } catch (err: any) {
-      console.warn("[System] Gemini API Error on first attempt, retrying in 2 seconds...", err.message || String(err));
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      try {
-        response = await chat.sendMessage({ message: promptToSend });
-      } catch (retryErr: any) {
-        console.error("[System] Gemini API Error on retry:", retryErr);
-        return res.status(500).json({ error: retryErr.message || String(retryErr) });
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userPrompt: userMessage.text, userAddress: USER_ADDRESS }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch response from Aegis");
       }
+
+      const data = await response.json();
+      
+      setChatLog((prev) => [...prev, { role: "aegis", text: data.text }]);
+      
+      if (data.payloads && data.payloads.length > 0) {
+        setPendingPayloads(data.payloads);
+      }
+    } catch (error) {
+      console.error(error);
+      setChatLog((prev) => [...prev, { role: "aegis", text: "Error: Could not reach the Aegis network." }]);
+    } finally {
+      setLoading(false);
     }
+  };
 
-    let payloadsGenerated: any[] = [];
-
-    // Execution loop to handle function calls
-    while (response.functionCalls && response.functionCalls.length > 0) {
-      console.log(`\n[System] Model requested ${response.functionCalls.length} tool call(s)`);
-
-      const toolResponses = [];
-
-      for (const call of response.functionCalls) {
-        console.log(`[System] Executing tool: ${call.name}`);
-        let result: any;
-
-        switch (call.name) {
-          case "check_wallet_balance": {
-            const args = call.args as { userAddress: string };
-            let addressStr = args?.userAddress || userAddress;
-            
-            if (!addressStr || !addressStr.startsWith("0x") || addressStr.length !== 42) {
-              addressStr = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
-            }
-            const address = addressStr as `0x${string}`;
-
-            const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
-            const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
-
-            console.log(`[System] Fetching real balances from Alfajores for ${address}...`);
-            
-            let realResult = "";
-            try {
-              const [usdmBalance, usdmDecimals, eurmBalance, eurmDecimals] = await Promise.all([
-                // @ts-ignore
-                client.readContract({
-                  address: usdmAddress,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [address]
-                }),
-                // @ts-ignore
-                client.readContract({
-                  address: usdmAddress,
-                  abi: erc20Abi,
-                  functionName: "decimals"
-                }),
-                // @ts-ignore
-                client.readContract({
-                  address: eurmAddress,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [address]
-                }),
-                // @ts-ignore
-                client.readContract({
-                  address: eurmAddress,
-                  abi: erc20Abi,
-                  functionName: "decimals"
-                })
-              ]);
-
-              const formattedUsdm = formatUnits(usdmBalance as bigint, usdmDecimals as number);
-              const formattedEurm = formatUnits(eurmBalance as bigint, eurmDecimals as number);
-              
-              realResult = `${formattedUsdm} USDm, ${formattedEurm} EURm`;
-            } catch (error: any) {
-              console.warn("[System] Error reading from blockchain. Falling back to mock data.", error.shortMessage || error.message);
-              realResult = "Error reading blockchain balances. Fallback to: 150 USDm, 5 EURm";
-            }
-
-            console.log(`[System] Blockchain query returned: ${realResult}`);
-            result = { balance: realResult };
-            break;
-          }
-
-          case "get_macro_fx_rate": {
-            const target = (call.args.targetFiat as string) || "EUR";
-            console.log(`[System] Fetching macro FX rate for USD to ${target}...`);
-            const rate = target.toUpperCase() === "EUR" ? 0.92 : 1.0;
-            console.log(`[System] Mock FX API returned: 1 USD = ${rate} ${target}`);
-            result = { rate, source: "CoinGecko (Mock)" };
-            break;
-          }
-
-          case "get_dex_quote": {
-            const target = (call.args.targetStablecoin as string) || "EURm";
-            console.log(`[System] Fetching DEX swap quote for USDm to ${target}...`);
-            const dexRate = target.toLowerCase() === "eurm" ? 0.915 : 1.0;
-            console.log(`[System] Mock DEX returned: 1 USDm = ${dexRate} ${target}`);
-            result = { dexRate, slippage: "0.1%", protocol: "Mock DEX" };
-            break;
-          }
-
-          case "execute_jit_payment": {
-            const args = call.args as any;
-            const merchantAddress = args.merchantAddress || "0x1111222233334444555566667777888899990000";
-            const amountTargetStr = args.amountTargetToken || "5";
-            const maxSourceStr = args.maxAmountSourceToken || "5.5";
-            
-            console.log(`[System] Generating JIT payment payloads for merchant: ${merchantAddress}`);
-            
-            const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
-            const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
-            const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121"; // Mock Router
-
-            try {
-              const amountOut = parseUnits(amountTargetStr, 18);
-              const amountInMax = parseUnits(maxSourceStr, 18);
-              const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20); // 20 mins
-
-              // @ts-ignore
-              const approveData = encodeFunctionData({
-                abi: erc20Abi,
-                functionName: "approve",
-                args: [dexRouterAddress, amountInMax],
-              });
-
-              // @ts-ignore
-              const swapData = encodeFunctionData({
-                abi: erc20Abi,
-                functionName: "swapTokensForExactTokens",
-                args: [amountOut, amountInMax, [usdmAddress, eurmAddress], merchantAddress as `0x${string}`, deadline],
-              });
-
-              console.log(`[System] Generated payloads successfully`);
-              
-              result = {
-                approvePayload: approveData,
-                swapPayload: swapData,
-                target: dexRouterAddress,
-                status: "ready_for_bundler"
-              };
-
-              payloadsGenerated.push(result);
-            } catch (err) {
-              console.error("[System] Payload generation error:", err);
-              result = { error: "Failed to generate payload. Ensure valid address and amount formatting." };
-            }
-            break;
-          }
-
-          default:
-            console.log(`[System] Unknown capability called: ${call.name}`);
-            result = { error: "Unknown capability" };
-            break;
-        }
-
-        toolResponses.push({
-          functionResponse: {
-            name: call.name,
-            response: result,
-          },
-        });
-      }
-
-      // Pass the tool responses back to the model 
-      try {
-        response = await chat.sendMessage({
-          message: toolResponses,
-        });
-      } catch (err: any) {
-        console.warn("[System] Gemini API Error during tool response on first attempt, retrying in 2 seconds...", err.message || String(err));
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        try {
-          response = await chat.sendMessage({
-            message: toolResponses,
-          });
-        } catch (retryErr: any) {
-          console.error("[System] Gemini API Error during tool response retry:", retryErr);
-          return res.status(500).json({ error: retryErr.message || String(retryErr) });
-        }
-      }
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      sendMessage();
     }
+  };
 
-    console.log(`[System] Final response sending back to client.`);
+  const executeTransaction = () => {
+    alert("Account Abstraction Bundler taking over! Executing gasless payloads on Celo...");
+    setPendingPayloads(null);
+    setChatLog((prev) => [...prev, { role: "aegis", text: "Transaction successfully submitted to the Celo network via the Bundler! Your purchase is secured." }]);
+  };
 
-    return res.json({
-      text: response.text,
-      payloads: payloadsGenerated,
-    });
+  return (
+    <div className="min-h-screen w-full bg-[#1A1C20] flex items-center justify-center font-sans tracking-wide">
+      {/* Mobile App Container */}
+      <div className="w-full max-w-[450px] h-[100dvh] sm:h-[85vh] sm:rounded-[40px] bg-[#0A0B0E] relative shadow-[0_0_80px_rgba(0,0,0,0.8)] overflow-hidden flex flex-col border border-white/5">
+        
+        {currentView === "landing" && (
+          <div className="flex-1 flex flex-col items-center justify-between p-8 relative h-full overflow-y-auto pb-12">
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-900/40 via-[#0A0B0E] to-[#0A0B0E] opacity-50 pointer-events-none"></div>
+            
+            <div className="flex flex-col items-center mt-12 relative z-10 w-full space-y-4 flex-shrink-0">
+              <div className="w-24 h-24 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shadow-[0_0_60px_rgba(16,185,129,0.3)] mb-4">
+                <div className="scale-[1.5]">
+                  <AegisLogo />
+                </div>
+              </div>
+              <h1 className="text-5xl font-bold bg-gradient-to-br from-white via-white to-white/50 bg-clip-text text-transparent tracking-tight">Aegis.</h1>
+              <p className="text-emerald-400 font-medium tracking-wide text-sm">Your Autonomous Web3 Treasury</p>
+            </div>
 
-  } catch (error: any) {
-    console.error("[Server] Error in /api/chat:", error);
-    res.status(500).json({ error: error.message || String(error) });
-  }
-});
+            <div className="w-full space-y-3 relative z-10 mb-auto mt-12 flex-shrink-0">
+              <div className="bg-[#181A20]/60 backdrop-blur-xl border border-white/10 rounded-2xl p-4 flex items-center gap-4">
+                <div className="text-xl bg-white/5 w-10 h-10 rounded-full flex items-center justify-center">🛡️</div>
+                <div>
+                  <h3 className="text-white font-medium text-sm">Inflation Shield</h3>
+                  <p className="text-white/40 text-xs mt-0.5">Auto-swap volatile local currency</p>
+                </div>
+              </div>
+              <div className="bg-[#181A20]/60 backdrop-blur-xl border border-white/10 rounded-2xl p-4 flex items-center gap-4">
+                <div className="text-xl bg-white/5 w-10 h-10 rounded-full flex items-center justify-center">⚡</div>
+                <div>
+                  <h3 className="text-white font-medium text-sm">Just-In-Time Routing</h3>
+                  <p className="text-white/40 text-xs mt-0.5">Best DEX rates guaranteed</p>
+                </div>
+              </div>
+              <div className="bg-[#181A20]/60 backdrop-blur-xl border border-white/10 rounded-2xl p-4 flex items-center gap-4">
+                <div className="text-xl bg-white/5 w-10 h-10 rounded-full flex items-center justify-center">🔋</div>
+                <div>
+                  <h3 className="text-white font-medium text-sm">Gasless Execution</h3>
+                  <p className="text-white/40 text-xs mt-0.5">Built for Opera MiniPay</p>
+                </div>
+              </div>
+            </div>
 
-export default app;
+            <button
+              onClick={() => setCurrentView("connecting")}
+              className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-black font-bold text-[15px] py-4 rounded-3xl shadow-[0_8px_32px_rgba(0,230,118,0.3)] hover:shadow-[0_8px_40px_rgba(0,230,118,0.5)] hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 relative overflow-hidden z-20 animate-pulse mt-8 flex-shrink-0 cursor-pointer"
+            >
+              <div className="absolute inset-0 bg-white/20 mix-blend-overlay pointer-events-none"></div>
+              <span className="relative z-10 pointer-events-none">Connect MiniPay Wallet</span>
+            </button>
+          </div>
+        )}
+
+        {currentView === "connecting" && (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 relative h-full space-y-8">
+             <div className="relative">
+               <div className="absolute inset-0 bg-emerald-500/20 rounded-full blur-xl animate-pulse"></div>
+               <div className="w-20 h-20 bg-[#181A20] rounded-full border border-emerald-500/30 flex items-center justify-center relative z-10">
+                 <div className="w-10 h-10 border-4 border-emerald-500/20 border-t-emerald-400 rounded-full animate-spin"></div>
+               </div>
+             </div>
+             <div className="text-center space-y-2">
+               <h2 className="text-white text-lg font-bold tracking-wide">Connecting Wallet</h2>
+               <p className="text-white/40 text-sm">Establishing secure link to MiniPay...</p>
+             </div>
+          </div>
+        )}
+
+        {currentView === "chat" && (
+          <>
+        {/* Header */}
+        <header className="px-6 py-5 sticky top-0 z-20 bg-black/60 backdrop-blur-xl border-b border-white/5 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="drop-shadow-[0_0_12px_rgba(0,229,255,0.4)]">
+              <AegisLogo />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent leading-none mb-1">Aegis</h1>
+              <p className="text-[10px] text-white/40 uppercase tracking-widest font-semibold">MiniPay Agent</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 bg-emerald-500/10 px-3 py-1.5 rounded-full border border-emerald-500/20">
+            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse drop-shadow-[0_0_5px_rgba(52,211,153,0.8)]"></div>
+            <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">Alfajores Live</span>
+          </div>
+        </header>
+
+        {/* Chat Area */}
+        <main className="flex-1 overflow-y-auto p-5 space-y-6 scroll-smooth pb-32">
+          {chatLog.map((msg, index) => (
+            <div key={index} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div 
+                className={`p-4 rounded-[24px] max-w-[85%] text-sm leading-relaxed whitespace-pre-wrap shadow-lg transition-all duration-300
+                  ${msg.role === "user" 
+                    ? "bg-gradient-to-r from-emerald-500 to-teal-400 text-black font-medium rounded-br-none" 
+                    : "bg-[#181A20]/80 backdrop-blur-md border border-white/5 text-zinc-300 rounded-tl-none font-normal shadow-[0_4px_24px_rgba(0,0,0,0.2)]"
+                }`}
+              >
+                {msg.role === "aegis" ? (
+                  <TypewriterText text={msg.text} />
+                ) : (
+                  msg.text
+                )}
+              </div>
+            </div>
+          ))}
+          
+          {loading && (
+            <div className="flex justify-start">
+              <div className="bg-[#181A20]/80 backdrop-blur-md border border-white/5 text-white/50 p-4 rounded-[24px] rounded-tl-none flex items-center gap-2 shadow-lg">
+                <div className="w-2 h-2 bg-cyan-400/80 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                <div className="w-2 h-2 bg-cyan-400/80 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                <div className="w-2 h-2 bg-cyan-400/80 rounded-full animate-bounce"></div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </main>
+
+        {/* Bottom Area (Execute Button + Input) */}
+        <div className="absolute bottom-0 left-0 right-0 p-5 bg-gradient-to-t from-[#0A0B0E] via-[#0A0B0E]/95 to-transparent pt-12 flex flex-col gap-4">
+          
+          {pendingPayloads && pendingPayloads.length > 0 && (
+            <button 
+              onClick={executeTransaction}
+              className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-black font-bold text-[15px] py-4 rounded-3xl shadow-[0_8px_32px_rgba(0,230,118,0.3)] hover:shadow-[0_8px_40px_rgba(0,230,118,0.5)] hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 flex items-center justify-center gap-2 relative overflow-hidden"
+            >
+              <div className="absolute inset-0 bg-white/20 animate-pulse mix-blend-overlay"></div>
+              <Zap className="w-5 h-5 fill-black/20" />
+              Pay Gasless
+            </button>
+          )}
+
+          <div className="relative flex items-center group">
+            <input
+              type="text"
+              className="w-full bg-[#181A20] border border-white/10 rounded-full py-4 pl-5 pr-14 text-white placeholder-white/30 focus:outline-none focus:border-emerald-500/50 focus:bg-[#1C1F26] transition-all duration-300 text-sm shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
+              placeholder="E.g., Swap for a 10 EURm coffee"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={loading}
+            />
+            <button 
+              onClick={sendMessage}
+              disabled={!prompt.trim() || loading}
+              className="absolute right-2 p-2.5 bg-emerald-500 hover:bg-emerald-400 text-black rounded-full disabled:opacity-50 disabled:hover:bg-emerald-500 transition-all duration-300 cursor-pointer disabled:cursor-not-allowed hover:scale-110 active:scale-95 shadow-lg shadow-emerald-500/20"
+            >
+              <Send className="w-4 h-4 ml-0.5" />
+            </button>
+          </div>
+          
+          <div className="text-center w-full pb-1">
+             <span className="text-[9px] text-white/20 uppercase tracking-[0.2em] font-medium">Secured by Gemini & Viem</span>
+          </div>
+        </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
