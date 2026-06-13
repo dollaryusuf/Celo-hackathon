@@ -88,33 +88,54 @@ export default function App() {
     setPendingPayloads(null);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userPrompt: userMessage.text,
-          userAddress: USER_ADDRESS,
-          chatHistory, // ← full conversation before this message; cures amnesia
-        }),
-      });
+      let response: Response;
+      try {
+        response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userPrompt: userMessage.text,
+            userAddress: USER_ADDRESS,
+            chatHistory,
+          }),
+        });
+      } catch (networkErr: any) {
+        // fetch() itself threw — the server is completely unreachable
+        setChatLog((prev) => [...prev, {
+          role: "aegis",
+          text: `Network error: Cannot reach /api/chat.\n\nReason: ${networkErr?.message ?? String(networkErr)}\n\nCheck the Vercel dashboard → Functions tab to confirm api/chat.ts is deployed.`,
+        }]);
+        setLoading(false);
+        return;
+      }
 
+      // Server responded but with an error status — read the body to get the real message
       if (!response.ok) {
-        throw new Error("Failed to fetch response from Aegis");
+        let serverMessage = `HTTP ${response.status} ${response.statusText}`;
+        try {
+          const errBody = await response.json();
+          serverMessage = errBody?.text || errBody?.error || JSON.stringify(errBody);
+        } catch {
+          try { serverMessage = await response.text(); } catch { /* ignore */ }
+        }
+        setChatLog((prev) => [...prev, {
+          role: "aegis",
+          text: `Server error (${response.status}): ${serverMessage}`,
+        }]);
+        setLoading(false);
+        return;
       }
 
       const data = await response.json();
-      
       setChatLog((prev) => [...prev, { role: "aegis", text: data.text }]);
-      
       if (data.payloads && data.payloads.length > 0) {
         setPendingPayloads(data.payloads);
       }
     } catch (error: any) {
-      console.error("[Aegis] sendMessage error:", error);
-      const detail = error?.message ?? String(error);
+      console.error("[Aegis] Unexpected error:", error);
       setChatLog((prev) => [...prev, {
         role: "aegis",
-        text: `Error: ${detail}\n\nCheck that your Express server is running and that GEMINI_API_KEY is set in your .env file.`,
+        text: `Unexpected error: ${error?.message ?? String(error)}`,
       }]);
     } finally {
       setLoading(false);
@@ -231,11 +252,10 @@ export default function App() {
                     : "bg-[#181A20]/80 backdrop-blur-md border border-white/5 text-zinc-300 rounded-tl-none font-normal shadow-[0_4px_24px_rgba(0,0,0,0.2)]"
                 }`}
               >
-                {/* Asterisks removed on the frontend right here! */}
                 {msg.role === "aegis" ? (
-                  <TypewriterText text={msg.text.replace(/\*/g, '')} />
+                  <TypewriterText text={msg.text} />
                 ) : (
-                  msg.text.replace(/\*/g, '')
+                  msg.text
                 )}
               </div>
             </div>
@@ -271,7 +291,7 @@ export default function App() {
             <input
               type="text"
               className="w-full bg-[#181A20] border border-white/10 rounded-full py-4 pl-5 pr-14 text-white placeholder-white/30 focus:outline-none focus:border-emerald-500/50 focus:bg-[#1C1F26] transition-all duration-300 text-sm shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
-              placeholder="E.g., Swap for a 10 EURm coffee"
+              placeholder="E.g., Swap for a 10 cEUR coffee"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
