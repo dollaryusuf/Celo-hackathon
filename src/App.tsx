@@ -231,10 +231,11 @@ export default function App() {
                     : "bg-[#181A20]/80 backdrop-blur-md border border-white/5 text-zinc-300 rounded-tl-none font-normal shadow-[0_4px_24px_rgba(0,0,0,0.2)]"
                 }`}
               >
+                {/* Asterisks removed on the frontend right here! */}
                 {msg.role === "aegis" ? (
-                  <TypewriterText text={msg.text} />
+                  <TypewriterText text={msg.text.replace(/\*/g, '')} />
                 ) : (
-                  msg.text
+                  msg.text.replace(/\*/g, '')
                 )}
               </div>
             </div>
@@ -270,7 +271,7 @@ export default function App() {
             <input
               type="text"
               className="w-full bg-[#181A20] border border-white/10 rounded-full py-4 pl-5 pr-14 text-white placeholder-white/30 focus:outline-none focus:border-emerald-500/50 focus:bg-[#1C1F26] transition-all duration-300 text-sm shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
-              placeholder="E.g., Swap for a 10 cEUR coffee"
+              placeholder="E.g., Swap for a 10 EURm coffee"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
