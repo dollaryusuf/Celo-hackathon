@@ -1,7 +1,7 @@
 import express from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import * as dotenv from "dotenv";
-import { createPublicClient, http, formatUnits, parseStr, parseAbi, encodeFunctionData, parseUnits } from "viem";
+import { createPublicClient, http, formatUnits, parseAbi, encodeFunctionData, parseUnits } from "viem";
 import { celoAlfajores } from "viem/chains";
 
 dotenv.config();
@@ -104,6 +104,14 @@ const app = express();
 
 app.use(express.json());
 
+// Strips markdown asterisks (bold/italic) and cleans up excess whitespace
+function stripAsterisks(text: string): string {
+  return text
+    .replace(/\*{1,3}(.*?)\*{1,3}/g, "$1") // remove *text*, **text**, ***text***
+    .replace(/\*+/g, "")                     // remove any stray asterisks
+    .trim();
+}
+
 // API POST endpoint for chat
 app.post("/api/chat", async (req, res) => {
   try {
@@ -120,8 +128,25 @@ app.post("/api/chat", async (req, res) => {
     const chat = ai.chats.create({
       model: "gemini-3.1-flash-lite",
       config: {
-        systemInstruction:
-          "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold USDm and perform Just-In-Time (JIT) swaps to local stablecoins like EURm or cREAL right before a purchase. Before authorizing a payment in a local currency, you MUST call both get_macro_fx_rate and get_dex_quote. Calculate exactly how much USDm is needed for the requested local currency amount, and inform the user if the rate is favorable before proceeding. When the user agrees to the payment, use the execute_jit_payment tool to prepare the transaction payloads. After receiving the payloads, tell the user: 'Transaction payload generated and ready for the bundler.' Suggest optimal swaps based on the balance to afford purchases.",
+        systemInstruction: `You are Aegis, an AI payment agent on the Celo network.
+
+STRICT RULES — you must follow these exactly, without exception:
+
+1. NEVER invent, estimate, or assume any number. Every balance, rate, or quote you mention must come directly from a tool call result in this conversation. If you do not have a tool result for a value, say "I don't have that data yet" and call the appropriate tool.
+
+2. NEVER respond with made-up exchange rates, balances, or transaction details. If a tool has not been called yet, call it before saying anything numeric.
+
+3. Before authorizing any payment in a local currency, you MUST call BOTH get_macro_fx_rate AND get_dex_quote. Do not skip either. Do not state a rate before both tools return results.
+
+4. After you receive tool results, report ONLY the exact values returned. Do not round, adjust, or embellish them.
+
+5. When the user confirms a payment, call execute_jit_payment with the correct values derived from the tool results. After that tool returns, tell the user: "Transaction payload generated and ready for the bundler." Do not fabricate payload data.
+
+6. Do not use markdown formatting of any kind in your responses. No asterisks, no bullet symbols, no headers, no bold, no italics. Write in plain sentences only.
+
+7. If you are unsure about any piece of data, call the relevant tool. Never guess.
+
+Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just before a purchase, using only real data from tools.`,
         tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
       },
     });
@@ -161,7 +186,6 @@ app.post("/api/chat", async (req, res) => {
             let addressStr = args?.userAddress || userAddress;
             
             if (!addressStr || !addressStr.startsWith("0x") || addressStr.length !== 42) {
-              // Default mock if nothing valid is provided
               addressStr = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
             }
             const address = addressStr as `0x${string}`;
@@ -175,31 +199,13 @@ app.post("/api/chat", async (req, res) => {
             try {
               const [usdmBalance, usdmDecimals, eurmBalance, eurmDecimals] = await Promise.all([
                 // @ts-ignore
-                client.readContract({
-                  address: usdmAddress,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [address]
-                }),
+                client.readContract({ address: usdmAddress, abi: erc20Abi, functionName: "balanceOf", args: [address] }),
                 // @ts-ignore
-                client.readContract({
-                  address: usdmAddress,
-                  abi: erc20Abi,
-                  functionName: "decimals"
-                }),
+                client.readContract({ address: usdmAddress, abi: erc20Abi, functionName: "decimals" }),
                 // @ts-ignore
-                client.readContract({
-                  address: eurmAddress,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [address]
-                }),
+                client.readContract({ address: eurmAddress, abi: erc20Abi, functionName: "balanceOf", args: [address] }),
                 // @ts-ignore
-                client.readContract({
-                  address: eurmAddress,
-                  abi: erc20Abi,
-                  functionName: "decimals"
-                })
+                client.readContract({ address: eurmAddress, abi: erc20Abi, functionName: "decimals" })
               ]);
 
               const formattedUsdm = formatUnits(usdmBalance, usdmDecimals);
@@ -208,7 +214,7 @@ app.post("/api/chat", async (req, res) => {
               realResult = `${formattedUsdm} USDm, ${formattedEurm} EURm`;
             } catch (error: any) {
               console.warn("[System] Error reading from blockchain. Falling back to mock data.", error.shortMessage || error.message);
-              realResult = "Error reading blockchain balances. Fallback to: 150 USDm, 5 EURm";
+              realResult = "Error reading blockchain balances. Fallback: 150 USDm, 5 EURm";
             }
 
             console.log(`[System] Blockchain query returned: ${realResult}`);
@@ -244,12 +250,12 @@ app.post("/api/chat", async (req, res) => {
             
             const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
             const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
-            const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121"; // Mock Router
+            const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121";
 
             try {
               const amountOut = parseUnits(amountTargetStr, 18);
               const amountInMax = parseUnits(maxSourceStr, 18);
-              const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20); // 20 mins
+              const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
 
               // @ts-ignore
               const approveData = encodeFunctionData({
@@ -296,18 +302,14 @@ app.post("/api/chat", async (req, res) => {
         });
       }
 
-      // Pass the tool responses back to the model 
+      // Pass the tool responses back to the model
       try {
-        response = await chat.sendMessage({
-          message: toolResponses,
-        });
+        response = await chat.sendMessage({ message: toolResponses });
       } catch (err: any) {
         console.warn("[System] Gemini API Error during tool response on first attempt, retrying in 2 seconds...", err.message || String(err));
         await new Promise(resolve => setTimeout(resolve, 2000));
         try {
-          response = await chat.sendMessage({
-            message: toolResponses,
-          });
+          response = await chat.sendMessage({ message: toolResponses });
         } catch (retryErr: any) {
           console.error("[System] Gemini API Error during tool response retry:", retryErr);
           throw retryErr;
@@ -319,7 +321,11 @@ app.post("/api/chat", async (req, res) => {
 
     let finalText = response?.text || "";
     if (finalText) {
-      finalText = finalText.replace(/cUSD/gi, "USDm").replace(/cEUR/gi, "EURm");
+      // Normalize token names, then strip asterisks and markdown artifacts
+      finalText = finalText
+        .replace(/cUSD/gi, "USDm")
+        .replace(/cEUR/gi, "EURm");
+      finalText = stripAsterisks(finalText);
     }
 
     return res.json({
