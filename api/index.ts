@@ -31,6 +31,20 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+// Shape sent from the frontend chatLog
+interface FrontendChatMessage {
+  role: "user" | "aegis";
+  text: string;
+}
+
+// Shape the Google GenAI SDK expects in the history array
+interface GeminiHistoryMessage {
+  role: "user" | "model";
+  parts: [{ text: string }];
+}
+
 // Tool Definitions
 const checkWalletBalanceTool = {
   name: "check_wallet_balance",
@@ -112,21 +126,50 @@ function stripAsterisks(text: string): string {
     .trim();
 }
 
+/**
+ * Maps the frontend's chatLog array (role: "user" | "aegis") into the format
+ * the Google GenAI SDK requires for the history property:
+ *   role: "user" | "model"
+ *   parts: [{ text: string }]
+ *
+ * "aegis" → "model" so Gemini recognises prior assistant turns correctly.
+ */
+function mapChatHistoryToGeminiFormat(
+  chatHistory: FrontendChatMessage[]
+): GeminiHistoryMessage[] {
+  return chatHistory.map((msg) => ({
+    role: msg.role === "aegis" ? "model" : "user",
+    parts: [{ text: msg.text }],
+  }));
+}
+
 // API POST endpoint for chat
 app.post("/api/chat", async (req, res) => {
   try {
-    const { userPrompt, userAddress } = req.body;
+    const {
+      userPrompt,
+      userAddress,
+      chatHistory = [], // frontend chatLog snapshot before the new user message
+    } = req.body as {
+      userPrompt: string;
+      userAddress?: string;
+      chatHistory: FrontendChatMessage[];
+    };
 
     if (!userPrompt) {
       return res.status(400).json({ error: "userPrompt is required" });
     }
 
-    console.log(`\n--- New Chat Session ---`);
+    console.log(`\n--- New Chat Turn ---`);
     console.log(`User Address: ${userAddress || "Not provided"}`);
+    console.log(`History turns received: ${chatHistory.length}`);
     console.log(`User Prompt: ${userPrompt}`);
 
+    // Map frontend chatHistory into the shape Gemini expects
+    const geminiHistory: GeminiHistoryMessage[] = mapChatHistoryToGeminiFormat(chatHistory);
+
     const chat = ai.chats.create({
-      model: "gemini-3.1-flash-lite",
+      model: "gemini-2.0-flash",
       config: {
         systemInstruction: `You are Aegis, an AI payment agent on the Celo network.
 
@@ -140,7 +183,7 @@ STRICT RULES — you must follow these exactly, without exception:
 
 4. After you receive tool results, report ONLY the exact values returned. Do not round, adjust, or embellish them.
 
-5. When the user confirms a payment, call execute_jit_payment with the correct values derived from the tool results. After that tool returns, tell the user: "Transaction payload generated and ready for the bundler." Do not fabricate payload data.
+5. If a user confirms a transaction (e.g., "yes, proceed"), check the chat history for the token amounts and merchant address, then immediately call execute_jit_payment with those values. After that tool returns, tell the user: "Transaction payload generated and ready for the bundler." Do not fabricate payload data.
 
 6. Do not use markdown formatting of any kind in your responses. No asterisks, no bullet symbols, no headers, no bold, no italics. Write in plain sentences only.
 
@@ -149,6 +192,8 @@ STRICT RULES — you must follow these exactly, without exception:
 Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just before a purchase, using only real data from tools.`,
         tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
       },
+      // Pass the mapped history so the model has full conversation context
+      history: geminiHistory,
     });
 
     // Contextual prompt if userAddress is known to the backend but not explicitly stated
@@ -184,7 +229,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
           case "check_wallet_balance": {
             const args = call.args as { userAddress: string };
             let addressStr = args?.userAddress || userAddress;
-            
+
             if (!addressStr || !addressStr.startsWith("0x") || addressStr.length !== 42) {
               addressStr = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
             }
@@ -194,7 +239,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
             const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
 
             console.log(`[System] Fetching real balances from Alfajores for ${address}...`);
-            
+
             let realResult = "";
             try {
               const [usdmBalance, usdmDecimals, eurmBalance, eurmDecimals] = await Promise.all([
@@ -210,7 +255,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
 
               const formattedUsdm = formatUnits(usdmBalance, usdmDecimals);
               const formattedEurm = formatUnits(eurmBalance, eurmDecimals);
-              
+
               realResult = `${formattedUsdm} USDm, ${formattedEurm} EURm`;
             } catch (error: any) {
               console.warn("[System] Error reading from blockchain. Falling back to mock data.", error.shortMessage || error.message);
@@ -245,9 +290,9 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
             const merchantAddress = args.merchantAddress || "0x1111222233334444555566667777888899990000";
             const amountTargetStr = args.amountTargetToken || "5";
             const maxSourceStr = args.maxAmountSourceToken || "5.5";
-            
+
             console.log(`[System] Generating JIT payment payloads for merchant: ${merchantAddress}`);
-            
+
             const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
             const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
             const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121";
@@ -272,7 +317,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
               });
 
               console.log(`[System] Generated payloads successfully`);
-              
+
               result = {
                 approvePayload: approveData,
                 swapPayload: swapData,
@@ -335,14 +380,9 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
 
   } catch (error: any) {
     console.error("[Server] Error in /api/chat:", error);
-    return res.json({
-      text: "I have checked the live rates. 1 USDm = 0.915 EURm. This is a highly favorable rate. I have prepared the Just-In-Time gasless transaction payload for you.",
-      payloads: [{
-        approvePayload: "0x095ea7b3000000000000000000000000e3d8bd6aed4f159bc8000a9cd47cffdb95f9612100000000000000000000000000000000000000000000000004c4b401e3a60000",
-        swapPayload: "0x38ed1739000000000000000000000000000000000000000000000000000000000000000500000000000000000000000000000000000000000000000004c4b401e3a60000",
-        target: "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121",
-        status: "ready_for_bundler"
-      }]
+    return res.status(500).json({
+      text: "An error occurred processing your request. Please try again.",
+      payloads: [],
     });
   }
 });

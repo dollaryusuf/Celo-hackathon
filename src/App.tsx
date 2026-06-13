@@ -77,6 +77,10 @@ export default function App() {
   const sendMessage = async () => {
     if (!prompt.trim()) return;
 
+    // Capture chatLog BEFORE appending the new user message — this snapshot
+    // is sent to the backend so Gemini can reconstruct the conversation context
+    const chatHistory = chatLog;
+
     const userMessage = { role: "user" as const, text: prompt };
     setChatLog((prev) => [...prev, userMessage]);
     setPrompt("");
@@ -87,7 +91,11 @@ export default function App() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userPrompt: userMessage.text, userAddress: USER_ADDRESS }),
+        body: JSON.stringify({
+          userPrompt: userMessage.text,
+          userAddress: USER_ADDRESS,
+          chatHistory, // ← full conversation before this message; cures amnesia
+        }),
       });
 
       if (!response.ok) {
@@ -283,4 +291,3 @@ export default function App() {
     </div>
   );
 }
-
