@@ -109,9 +109,13 @@ export default function App() {
       if (data.payloads && data.payloads.length > 0) {
         setPendingPayloads(data.payloads);
       }
-    } catch (error) {
-      console.error(error);
-      setChatLog((prev) => [...prev, { role: "aegis", text: "Error: Could not reach the Aegis network." }]);
+    } catch (error: any) {
+      console.error("[Aegis] sendMessage error:", error);
+      const detail = error?.message ?? String(error);
+      setChatLog((prev) => [...prev, {
+        role: "aegis",
+        text: `Error: ${detail}\n\nCheck that your Express server is running and that GEMINI_API_KEY is set in your .env file.`,
+      }]);
     } finally {
       setLoading(false);
     }

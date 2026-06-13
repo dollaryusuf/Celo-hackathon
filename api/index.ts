@@ -379,9 +379,12 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
     });
 
   } catch (error: any) {
-    console.error("[Server] Error in /api/chat:", error);
+    const message = error?.message || String(error);
+    const status = error?.status || error?.statusCode || 500;
+    console.error(`[Server] /api/chat error (${status}):`, message);
+    console.error("[Server] Full error:", error);
     return res.status(500).json({
-      text: "An error occurred processing your request. Please try again.",
+      text: `Server error: ${message}`,
       payloads: [],
     });
   }
