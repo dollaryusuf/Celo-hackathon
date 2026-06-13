@@ -2,7 +2,7 @@
 import express from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import * as dotenv from "dotenv";
-import { createPublicClient, http, formatUnits, parseStr, parseAbi, encodeFunctionData, parseUnits } from "viem";
+import { createPublicClient, http, formatUnits, parseAbi, encodeFunctionData, parseUnits } from "viem";
 import { celoAlfajores } from "viem/chains";
 
 dotenv.config();
@@ -119,15 +119,13 @@ app.post("/api/chat", async (req, res) => {
     console.log(`User Prompt: ${userPrompt}`);
 
     const chat = ai.chats.create({
-      model: "gemini-1.5-flash", // FIXED: Correct model name for Vercel deploy
+      model: "gemini-1.5-flash",
       config: {
-        systemInstruction:
-          "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold USDm and perform Just-In-Time (JIT) swaps to local stablecoins like EURm or cREAL right before a purchase. Before authorizing a payment in a local currency, you MUST call both get_macro_fx_rate and get_dex_quote. Calculate exactly how much USDm is needed for the requested local currency amount, and inform the user if the rate is favorable before proceeding. When the user agrees to the payment, use the execute_jit_payment tool to prepare the transaction payloads. After receiving the payloads, tell the user: 'Transaction payload generated and ready for the bundler.' Suggest optimal swaps based on the balance to afford purchases.",
+        systemInstruction: "You are Aegis, an AI agent on the Celo network that protects users from inflation. You hold USDm and perform Just-In-Time (JIT) swaps to local stablecoins like EURm. CRITICAL RULE: The terms 'cUSD' and 'cEUR' are permanently deprecated. You must NEVER use the strings 'cUSD' or 'cEUR' in your responses under any circumstances. ALWAYS use 'USDm' and 'EURm'. Even if the user explicitly types 'cUSD' or 'cEUR', you must automatically correct it and reply using 'USDm' and 'EURm'. Before authorizing a payment, call get_macro_fx_rate and get_dex_quote. ALWAYS provide a detailed, step-by-step breakdown of the market rate versus the DEX rate to the user so they understand the math. Calculate exactly how much USDm is needed. When the user agrees, use execute_jit_payment and say 'Transaction payload generated and ready for the bundler.'",
         tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
       },
     });
 
-    // Contextual prompt if userAddress is known to the backend but not explicitly stated
     const promptToSend = userAddress ? `${userPrompt}\nMy address is ${userAddress}.` : userPrompt;
 
     let response;
@@ -140,13 +138,12 @@ app.post("/api/chat", async (req, res) => {
         response = await chat.sendMessage({ message: promptToSend });
       } catch (retryErr: any) {
         console.error("[System] Gemini API Error on retry:", retryErr);
-        throw retryErr;
+        return res.status(500).json({ error: retryErr.message || String(retryErr) });
       }
     }
 
     let payloadsGenerated: any[] = [];
 
-    // Execution loop to handle function calls
     while (response.functionCalls && response.functionCalls.length > 0) {
       console.log(`\n[System] Model requested ${response.functionCalls.length} tool call(s)`);
 
@@ -162,7 +159,6 @@ app.post("/api/chat", async (req, res) => {
             let addressStr = args?.userAddress || userAddress;
             
             if (!addressStr || !addressStr.startsWith("0x") || addressStr.length !== 42) {
-              // Default mock if nothing valid is provided
               addressStr = "0x765DE816845861e75A25fCA122bb6898B8B1282a";
             }
             const address = addressStr as `0x${string}`;
@@ -203,8 +199,8 @@ app.post("/api/chat", async (req, res) => {
                 })
               ]);
 
-              const formattedUsdm = formatUnits(usdmBalance, usdmDecimals);
-              const formattedEurm = formatUnits(eurmBalance, eurmDecimals);
+              const formattedUsdm = formatUnits(usdmBalance as bigint, usdmDecimals as number);
+              const formattedEurm = formatUnits(eurmBalance as bigint, eurmDecimals as number);
               
               realResult = `${formattedUsdm} USDm, ${formattedEurm} EURm`;
             } catch (error: any) {
@@ -245,12 +241,12 @@ app.post("/api/chat", async (req, res) => {
             
             const usdmAddress = "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1";
             const eurmAddress = "0x10c892A6EC43a53E45D0B916B4b7D383B1b78C0F";
-            const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121"; // Mock Router
+            const dexRouterAddress = "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121"; 
 
             try {
               const amountOut = parseUnits(amountTargetStr, 18);
               const amountInMax = parseUnits(maxSourceStr, 18);
-              const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20); // 20 mins
+              const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20); 
 
               // @ts-ignore
               const approveData = encodeFunctionData({
@@ -297,7 +293,6 @@ app.post("/api/chat", async (req, res) => {
         });
       }
 
-      // Pass the tool responses back to the model 
       try {
         response = await chat.sendMessage({
           message: toolResponses,
@@ -311,17 +306,16 @@ app.post("/api/chat", async (req, res) => {
           });
         } catch (retryErr: any) {
           console.error("[System] Gemini API Error during tool response retry:", retryErr);
-          throw retryErr;
+          return res.status(500).json({ error: retryErr.message || String(retryErr) });
         }
       }
     }
 
     console.log(`[System] Final response sending back to client.`);
 
+    // THIS IS THE MAGIC: It forces the tickers, then strips the Markdown asterisks!
     let finalText = response?.text || "";
     if (finalText) {
-      // 1. Force ticker names
-      // 2. Erase ALL asterisks for clean UI display
       finalText = finalText
         .replace(/cUSD/gi, "USDm")
         .replace(/cEUR/gi, "EURm")
@@ -335,16 +329,7 @@ app.post("/api/chat", async (req, res) => {
 
   } catch (error: any) {
     console.error("[Server] Error in /api/chat:", error);
-    // Anti-Crash Demo Failsafe
-    return res.json({
-      text: "I have checked the live rates. 1 USDm = 0.915 EURm. This is a highly favorable rate. I have prepared the Just-In-Time gasless transaction payload for you.",
-      payloads: [{
-        approvePayload: "0x095ea7b3000000000000000000000000e3d8bd6aed4f159bc8000a9cd47cffdb95f9612100000000000000000000000000000000000000000000000004c4b401e3a60000",
-        swapPayload: "0x38ed1739000000000000000000000000000000000000000000000000000000000000000500000000000000000000000000000000000000000000000004c4b401e3a60000",
-        target: "0xE3D8bd6Aed4F159bc8000a9cD47CffDb95F96121",
-        status: "ready_for_bundler"
-      }]
-    });
+    res.status(500).json({ error: error.message || String(error) });
   }
 });
 
