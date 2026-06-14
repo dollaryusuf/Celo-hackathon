@@ -94,13 +94,6 @@ const executeJitPaymentTool = {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function stripAsterisks(text: string): string {
-  return text
-    .replace(/\*{1,3}(.*?)\*{1,3}/g, "$1")
-    .replace(/\*+/g, "")
-    .trim();
-}
-
 function mapChatHistoryToGeminiFormat(
   chatHistory: FrontendChatMessage[]
 ): GeminiHistoryMessage[] {
@@ -113,12 +106,10 @@ function mapChatHistoryToGeminiFormat(
 // ─── Vercel Serverless Handler ────────────────────────────────────────────────
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Only allow POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // CORS headers so the deployed frontend can reach this function
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -140,19 +131,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!process.env.GEMINI_API_KEY) {
       return res.status(500).json({
-        text: "Server error: GEMINI_API_KEY environment variable is not set. Add it in your Vercel project settings under Settings → Environment Variables.",
+        text: "Server error: GEMINI_API_KEY is not set. Add it in Vercel → Settings → Environment Variables.",
         payloads: [],
       });
     }
 
     console.log(`[Aegis] Turn — history: ${chatHistory.length} msgs | prompt: ${userPrompt}`);
 
+    // Map frontend chatHistory to Gemini's required format
     const geminiHistory: GeminiHistoryMessage[] = mapChatHistoryToGeminiFormat(chatHistory);
 
     const chat = ai.chats.create({
-      model: "gemini-2.0-flash",
+      model: "gemini-1.5-flash",
       config: {
-        systemInstruction: `You are Aegis, an AI payment agent on the Celo network.
+        systemInstruction: `You are Aegis, an AI payment agent on the Celo network. You hold USDm and perform JIT swaps to EURm right before a purchase.
+
+CRITICAL RULE: The terms cUSD and cEUR are permanently deprecated. NEVER use the strings cUSD or cEUR in any response. ALWAYS use USDm and EURm exclusively.
 
 STRICT RULES — follow these exactly, without exception:
 
@@ -160,17 +154,15 @@ STRICT RULES — follow these exactly, without exception:
 
 2. NEVER respond with made-up exchange rates, balances, or transaction details. If a tool has not been called yet, call it before saying anything numeric.
 
-3. Before authorizing any payment in a local currency, you MUST call BOTH get_macro_fx_rate AND get_dex_quote. Do not skip either. Do not state a rate before both tools return results.
+3. Before authorizing any payment in a local currency, you MUST call BOTH get_macro_fx_rate AND get_dex_quote. Do not skip either.
 
 4. After you receive tool results, report ONLY the exact values returned. Do not round, adjust, or embellish them.
 
-5. If a user confirms a transaction (e.g., "yes, proceed"), check the chat history for the token amounts and merchant address, then immediately call execute_jit_payment with those values. After that tool returns, tell the user: "Transaction payload generated and ready for the bundler." Do not fabricate payload data.
+5. If a user confirms a transaction (e.g. "yes, proceed"), check the chat history for the token amounts and merchant address, then immediately call execute_jit_payment with those values. After that tool returns, say exactly: "Transaction payload generated and ready for the bundler." Do not fabricate payload data.
 
 6. Do not use markdown formatting of any kind. No asterisks, no bullet symbols, no headers, no bold, no italics. Write in plain sentences only.
 
-7. If you are unsure about any piece of data, call the relevant tool. Never guess.
-
-Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just before a purchase, using only real data from tools.`,
+7. If you are unsure about any piece of data, call the relevant tool. Never guess.`,
         tools: [{ functionDeclarations: [checkWalletBalanceTool, getMacroFxRateTool, getDexQuoteTool, executeJitPaymentTool] }],
       },
       history: geminiHistory,
@@ -216,7 +208,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
               const balance = `${formatUnits(usdmBalance, usdmDecimals)} USDm, ${formatUnits(eurmBalance, eurmDecimals)} EURm`;
               result = { balance };
             } catch (err: any) {
-              result = { balance: "Fallback: 150 USDm, 5 EURm" };
+              result = { balance: "Error reading blockchain balances. Fallback to: 150 USDm, 5 EURm" };
             }
             break;
           }
@@ -231,7 +223,7 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
           case "get_dex_quote": {
             const target = (call.args.targetStablecoin as string) || "EURm";
             const dexRate = target.toLowerCase() === "eurm" ? 0.915 : 1.0;
-            result = { dexRate, slippage: "0.1%", protocol: "Mock DEX" };
+            result = { dexRate, slippage: "0.1%", protocol: "Mento Mock DEX" };
             break;
           }
 
@@ -269,10 +261,11 @@ Your job: help users swap USDm to local stablecoins (like EURm or cREAL) just be
       response = await chat.sendMessage({ message: toolResponses });
     }
 
-    let finalText = (response?.text || "")
+    // Scrub deprecated tickers and markdown asterisks from the final text
+    const finalText = (response?.text || "")
       .replace(/cUSD/gi, "USDm")
-      .replace(/cEUR/gi, "EURm");
-    finalText = stripAsterisks(finalText);
+      .replace(/cEUR/gi, "EURm")
+      .replace(/\*/g, "");
 
     return res.status(200).json({ text: finalText, payloads: payloadsGenerated });
 
