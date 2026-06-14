@@ -162,7 +162,7 @@ export default function App() {
           ...prev,
           {
             role: "aegis",
-            text: "Hello! I am Aegis, your shield against inflation. (Note: I am currently running in Hackathon Demo Mode). Try asking me to 'Swap for a 10 EURm coffee' to see my autonomous routing in action!",
+            text: "Hello! I am Aegis, your shield against inflation. I am securely connected to your MiniPay wallet. How can I help you protect your purchasing power today? You can ask me to check your balance, or autonomously route a payment like 'Swap for a 10 EURm coffee'.",
           },
         ]);
       }
